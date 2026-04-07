@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>AR Fitness</title>
+  
+  <script src="[https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js](https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js)" crossorigin="anonymous"></script>
+  <script src="[https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js](https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js)" crossorigin="anonymous"></script>
+  <script src="[https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js](https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js)" crossorigin="anonymous"></script>
+  <script src="[https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js](https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js)" crossorigin="anonymous"></script>
+
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: -apple-system, sans-serif; user-select: none; }
+    
+    /* Video and Canvas Layers */
+    .video-container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+    .input_video { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: none; }
+    .output_canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); z-index: 1; }
+
+    /* HUD (Heads Up Display) */
+    .hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 30px 20px; box-sizing: border-box; }
+    
+    .header { display: flex; justify-content: space-between; align-items: flex-start; }
+    .title { font-size: 24px; font-weight: 900; text-transform: uppercase; color: #00ffcc; text-shadow: 0 0 10px rgba(0,255,204,0.5); margin: 0;}
+    .status { font-size: 14px; background: rgba(0,0,0,0.6); padding: 5px 12px; border-radius: 20px; backdrop-filter: blur(4px); border: 1px solid #333; }
+    .status.tracking { color: #00ffcc; border-color: #00ffcc; animation: pulse 2s infinite; }
+    
+    .rep-box { text-align: right; }
+    .rep-count { font-size: 72px; font-weight: 900; line-height: 1; color: #fff; text-shadow: 0 4px 15px rgba(0,0,0,0.8); }
+    .rep-target { font-size: 18px; color: #aaa; font-weight: 600; }
+    
+    .instruction { align-self: center; background: rgba(0,255,204,0.15); border: 2px solid #00ffcc; padding: 15px 25px; border-radius: 12px; font-size: 20px; font-weight: bold; backdrop-filter: blur(8px); text-align: center; margin-bottom: 40px; box-shadow: 0 0 20px rgba(0,255,204,0.2); }
+    .instruction.success { background: rgba(0,255,100,0.3); border-color: #00ff64; color: #fff; }
+
+    /* Loading Screen */
+    .loader { position: absolute; inset: 0; background: #000; z-index: 10; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 20px; transition: opacity 0.5s; }
+    .spinner { width: 40px; height: 40px; border: 4px solid #333; border-top-color: #00ffcc; border-radius: 50%; animation: spin 1s linear infinite; }
+    
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+</head>
+<body>
+
+  <div class="loader" id="loader">
+    <div class="spinner"></div>
+    <div>Loading Vision AI...</div>
+  </div>
+
+  <div class="video-container">
+    <video class="input_video" playsinline></video>
+    <canvas class="output_canvas" width="720" height="1280"></canvas>
+    
+    <div class="hud">
+      <div class="header">
+        <div>
+          <h1 class="title" id="ex-title">SQUATS</h1>
+          <div class="status" id="status-badge">Stand back...</div>
+        </div>
+        <div class="rep-box">
+          <div class="rep-count" id="rep-val">0</div>
+          <div class="rep-target" id="rep-tgt">/ 10</div>
+        </div>
+      </div>
+      
+      <div class="instruction" id="coach-msg">Step back so I can see your full body!</div>
+    </div>
+  </div>
+
+  <script>
+    // App State
+    let targetReps = 10;
+    let exercise = 'squats';
+    let currentReps = 0;
+    let poseStage = "up"; // "up" or "down"
+    
+    // UI Elements
+    const videoElement = document.getElementsByClassName('input_video')[0];
+    const canvasElement = document.getElementsByClassName('output_canvas')[0];
+    const canvasCtx = canvasElement.getContext('2d');
+    const repVal = document.getElementById('rep-val');
+    const msg = document.getElementById('coach-msg');
+    const statusBadge = document.getElementById('status-badge');
+    const loader = document.getElementById('loader');
+
+    // Parse Intent Data
+    const params = new URLSearchParams(window.location.search);
+    try {
+      if (params.has('data')) {
+        const parsed = JSON.parse(decodeURIComponent(params.get('data')));
+        if (parsed.target_reps) targetReps = parsed.target_reps;
+        if (parsed.exercise) {
+          exercise = parsed.exercise.toLowerCase();
+          document.getElementById('ex-title').innerText = exercise;
+        }
+        document.getElementById('rep-tgt').innerText = `/ ${targetReps}`;
+      }
+    } catch(e) {}
+
+    // Math: Calculate angle between three joints (e.g., Hip, Knee, Ankle)
+    function calculateAngle(a, b, c) {
+      const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+      let angle = Math.abs((radians * 180.0) / Math.PI);
+      if (angle > 180.0) angle = 360 - angle;
+      return angle;
+    }
+
+    // Sound effect synthesizer for rep completion
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playDing() {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.type = 'sine'; osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+    }
+
+    // MediaPipe Results Callback
+    function onResults(results) {
+      // Hide loader once the first frame is processed
+      if (loader.style.opacity !== '0') {
+        loader.style.opacity = '0';
+        setTimeout(() => loader.style.display = 'none', 500);
+      }
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      
+      // Only draw the camera feed if we have a valid video frame
+      if(results.image) {
+          canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+      }
+
+      if (results.poseLandmarks) {
+        statusBadge.innerText = '● TRACKING';
+        statusBadge.className = 'status tracking';
+
+        // Draw the neon skeleton
+        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: 'rgba(0, 255, 204, 0.5)', lineWidth: 4});
+        drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#fff', lineWidth: 2, radius: 3});
+
+        // Track Squats
+        if (exercise === 'squats' || exercise === 'squat') {
+          // Use Left Side (Visibility checks could be added here for robustness)
+          const hip = results.poseLandmarks[23];
+          const knee = results.poseLandmarks[25];
+          const ankle = results.poseLandmarks[27];
+          
+          if (hip.visibility > 0.5 && knee.visibility > 0.5 && ankle.visibility > 0.5) {
+            const angle = calculateAngle(hip, knee, ankle);
+            
+            // Squat Logic
+            if (angle > 160) {
+              if (poseStage === 'down') {
+                poseStage = 'up';
+                currentReps += 1;
+                repVal.innerText = currentReps;
+                playDing();
+                
+                if (currentReps >= targetReps) {
+                  msg.innerText = "CHALLENGE COMPLETE! 🔥";
+                  msg.className = "instruction success";
+                }
+              }
+              if (currentReps < targetReps) msg.innerText = "Go down...";
+            } 
+            else if (angle < 90) {
+              poseStage = 'down';
+              if (currentReps < targetReps) msg.innerText = "Hold... Now push up!";
+            }
+          } else {
+            msg.innerText = "Make sure I can see your legs!";
+          }
+        }
+      } else {
+        statusBadge.innerText = 'No body detected';
+        statusBadge.className = 'status';
+      }
+      canvasCtx.restore();
+    }
+
+    // Initialize MediaPipe Pose Model
+    const pose = new Pose({locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+    }});
+    
+    pose.setOptions({
+      modelComplexity: 1, // 0=fastest, 1=balanced, 2=accurate
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    pose.onResults(onResults);
+
+    // Initialize Camera
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await pose.send({image: videoElement});
+      },
+      width: 720,
+      height: 1280,
+      facingMode: 'user'
+    });
+    
+    camera.start();
+  </script>
+</body>
+</html>
